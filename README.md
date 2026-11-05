@@ -1,22 +1,11 @@
 ---
-title: CS 537 Project 3
+title: Unix Shell
 layout: default
 ---
 
-# CS537 Spring 2025, Project 3
+# Unix Shell
 
-## ⚠️Warnings⚠️
-
-- This project will be checked for memory leaks! 
-Here is an example how you can check for leaks:
-```
-valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --verbose
-
-gcc --sanitize=address
-```
-- This project will have hidden test cases, which will not be released before due date, please add your own tests to test the different functionalities and edge cases.
-- This project is time consuming, start now!
-
+This is a project for CS 537 (Operating Systems) at UW-Madison.
 
 ## Submitting your work
 - Run `submission.sh` 

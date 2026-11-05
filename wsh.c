@@ -97,7 +97,7 @@ int batch_main(char *scriptFile)
     exit(-1);
   }
 
-  char line[MAXLINE];
+  char line[MAXLINE + 1];
   while (fgets(line, MAXLINE, file) != NULL)
   {
     int length = strlen(line);
@@ -107,10 +107,11 @@ int batch_main(char *scriptFile)
       line[length + 1] = '\0';
     }
     eval(line);
+    fflush(stdout);
   }
 
   fclose(file);
-  exit(0);
+  exit(exit_value);
   return 0;
 }
 
@@ -118,10 +119,22 @@ int batch_main(char *scriptFile)
 /* TODO: Actual Evaluation */
 void eval(char *cmdline)
 {
+  //have to check this before substitution because $a gets replaced below
+  if (strncmp(cmdline, "local $", 7) == 0) {
+    fprintf(stderr, "Incorrect usage of local. Usage: local {VariableName}={VariableValue}\n");
+    exit_value = -1;
+    return;
+  }
 
   cmdline = do_variable_substitution(cmdline);
 
   cmdline = replaceCommandSubstitution(cmdline);
+
+  //returns NULL on errors like unmatched parentheses, the message was already printed
+  if (cmdline == NULL) {
+    exit_value = -1;
+    return;
+  }
 
   /* If the command contains a pipe, handle it separately */
   if (strchr(cmdline, '|') != NULL)
@@ -132,7 +145,7 @@ void eval(char *cmdline)
 
   /* you can invoke parseline_no_subst(const char *cmdline, char **argv, int *argc)
     for basic parsing with no substitutions*/
-  char *argv[MAXARGS] = {NULL};
+  char *argv[MAXARGS + 1] = {NULL};
   int argc = 0;
 
   parseline_no_subst(cmdline, argv, &argc);
@@ -175,12 +188,12 @@ void eval(char *cmdline)
     
     //can exit here because we dont want to call execv which will also return an error 
     if(path == NULL) {
-      exit(-1);
+      _exit(-1);
     }
 
     execv(path, argv);
     perror("execv");
-    exit(-1);
+    _exit(-1);
   }
   
   //parent process
@@ -188,6 +201,7 @@ void eval(char *cmdline)
     int status;
     waitpid(pid, &status, 0);
     //dont really know how to check waitpid here. not really mentioned that we have to. i hope we dont have to.
+    exit_value = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   } 
   //fork failed
   else {
@@ -213,10 +227,10 @@ void check_params(char **argv, int argc)
 void eval_pipe(char *cmdline)
 {
   /* Split the processed command line on '|' */
-  char *commands[MAXARGS];
+  char *commands[MAXARGS + 1];
   int num_commands = 0;
   char *token = strtok(cmdline, "|");
-  while (token != NULL && num_commands < MAXARGS)
+  while (token != NULL && num_commands < MAXARGS + 1)
   {
     while (*token == ' ')
       token++; /* trim leading whitespace */
@@ -229,7 +243,7 @@ void eval_pipe(char *cmdline)
   int argc_list[num_commands];
   for (int i = 0; i < num_commands; i++)
   {
-    argv_list[i] = malloc(sizeof(char *) * MAXARGS);
+    argv_list[i] = malloc(sizeof(char *) * (MAXARGS + 1));
     parseline_no_subst(commands[i], argv_list[i], &argc_list[i]);
     free(commands[i]);
     if (!argc_list[i])
@@ -290,9 +304,9 @@ void eval_pipe(char *cmdline)
       if (path) {
         execv(path, argv_list[i]);
         perror("execv");
-        exit(-1);
+        _exit(-1);
       } else {
-        return;
+        _exit(-1);
       }
     }
   }
@@ -304,11 +318,16 @@ void eval_pipe(char *cmdline)
 
   //let child processes finish
   for (int i = 0; i < num_commands; i++) {
-    if (waitpid(pid[i], NULL, 0) == -1) {
+    int status;
+    if (waitpid(pid[i], &status, 0) == -1) {
         perror("waitpid");
         exit(-1);
     }
-  } 
+    //exit value of a pipeline is the exit value of the last command
+    if (i == num_commands - 1) {
+      exit_value = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+  }
 
   for (int i = 0; i < num_commands; i++)
   {
@@ -414,24 +433,27 @@ char *do_variable_substitution(const char *command)
         }
 
         //length of new variable
-        size_t new_len = strlen(current) - token_len + var_value_len + 1;
+        size_t old_len = strlen(current) + 1;
+        size_t new_len = old_len - token_len + var_value_len;
 
-        //reallocate memory to make space or remove space
-        char *new_current = realloc(current, new_len);
+        //realloc can move current so remember where pos was
+        size_t pos_offset = pos - current;
+
+        //reallocate memory to make space. never shrink because the text is not shifted yet
+        char *new_current = realloc(current, new_len > old_len ? new_len : old_len);
         if (new_current == NULL)
         {
             perror("realloc"); //need to exit
             exit(-1);
         }
         current = new_current;
+        pos = current + pos_offset;
 
         //shift remaining content to adjust for new length
         size_t len = strlen(pos + token_len) + 1;
 
-        //copy data to each character position respectively
-        for (size_t i = 0; i < len; i++) {
-            pos[var_value_len + i] = pos[token_len + i];
-        }
+        //memmove because the old and new positions can overlap
+        memmove(pos + var_value_len, pos + token_len, len);
 
         //if NULL copy empty and copy if not
         if (var_value != NULL) {
@@ -649,10 +671,10 @@ char *replaceCommandSubstitution(const char *command)
 
     free(sub_cmd);
 
-    /* Remove a trailing newline if present */
+    /* Remove all trailing newlines if present */
     size_t out_len = strlen(output);
-    if (out_len > 0 && output[out_len - 1] == '\n')
-      output[out_len - 1] = '\0';
+    while (out_len > 0 && output[out_len - 1] == '\n')
+      output[--out_len] = '\0';
 
     size_t prefix_len = sub_start - result;
     size_t output_len = strlen(output);
@@ -714,6 +736,10 @@ void parseline_no_subst(const char *cmdline, char **argv, int *argc)
       if (!token)
       {
         app_error("Missing closing quote\n");
+        //clear what was parsed so far so the command does not run
+        argv[0] = NULL;
+        *argc = 0;
+        exit_value = -1;
         free(buf);
         return;
       }
@@ -786,7 +812,7 @@ void exit_built_in(int argc) {
 void export_built_in(char **argv) {
   //told to "When export command does not have exactly two tokens (including export)", made sure that we did not exit
   if (argv[1] == NULL || argv[2] != NULL) {
-    fprintf(stderr, "Incorrect usage of export. Usage: export VAR=<value>\n"); //do not exit
+    fprintf(stderr, "Incorrect usage of export. Usage: export {VariableName}={VariableValue}\n"); //do not exit
     exit_value = -1;
     return;
   }
@@ -836,9 +862,12 @@ void export_built_in(char **argv) {
     empty string will clear the variable. Cleared variable will be still visible in the list of variables (vars). Important 
     note here is that though the value is optional, key is not, invocation like local =<value> or local are errors.*/
 void local_built_in(char **argv) {
+    exit_value = 0;
+
     // Check for incorrect usage (must have a variable name and at most one argument)
     if (argv[1] == NULL || argv[2] != NULL) {
-        fprintf(stderr, "Incorrect usage of local. Usage: local VAR=<value>\n");
+        fprintf(stderr, "Incorrect usage of local. Usage: local {VariableName}={VariableValue}\n");
+        exit_value = -1;
         return;
     }
 
@@ -853,14 +882,16 @@ void local_built_in(char **argv) {
     }
 
     // Validate variable name (should not contain spaces or '=')
-    if (strchr(var_name, ' ') || strchr(var_name, '=')) {
+    if (var_name[0] == '\0' || strchr(var_name, ' ') || strchr(var_name, '=')) {
         fprintf(stderr, "Invalid variable name: %s\n", var_name);
+        exit_value = -1;
         return;
     }
 
     // Reject variable names starting with '$' (they should not be assigned)
     if (var_name[0] == '$') {
         fprintf(stderr, "Invalid variable name: %s\n", var_name);
+        exit_value = -1;
         return;
     }
 
@@ -899,6 +930,8 @@ void local_built_in(char **argv) {
 
 /*vars: Described below in the "Displaying Variables" section.*/
 void vars_built_in() {
+  exit_value = 0;
+
   //print all local variables
   for (int i = 0; i < var_count; i++) {
       //print each variable such as a = b
@@ -912,6 +945,7 @@ void ls_built_in() {
   DIR *dir = opendir(".");
   if (!dir) {
     perror("opendir");
+    exit_value = -1;
     return;
   }
 
@@ -949,10 +983,13 @@ void ls_built_in() {
 /*ps: Produces a subset of ps -eo pid:5,ppid:5,s:1,comm --sort=pid command, We will print processes with only digit name directories in /proc/, you can can  these parameters
     from the stat file in each process directory. Do not spawn the ps program because this is a built-in. This built-in does not implement any parameters.*/
 void ps_built_in() {
+  exit_value = 0;
+
   DIR *proc_dir = opendir("/proc");
   if (!proc_dir)
   {
       perror("opendir");
+      exit_value = -1;
       return;
   }
   struct dirent *entry;
